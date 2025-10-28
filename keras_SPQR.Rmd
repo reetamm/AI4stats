@@ -17,7 +17,8 @@ We will be using Google Colab for this example on density regression using semi-
 ```{r, include = F}
 rm(list=ls())
 reticulate::use_virtualenv("myenv", required = T)
-library(tensorflow)
+#library(tensorflow)
+library(keras)
 library(keras3)
 ```
 
@@ -98,10 +99,11 @@ knots = seq(1/(n.knots-2), 1-1/(n.knots-2), length=n.knots-3)
 
 ## Data import and pre-processing
 
-This is wildfire data used by Lawler and Shaby (2024). In particular, we use the tmax and precip data for a specific L3 ecoregion in the US.
+This is temperature and precipitation data at a single grid point in the US, based on the nClimGrid dataset. It is part of the data used by [Majumder et al (2024)](https://arxiv.org/abs/2411.18799) for bias correcting climate model data. I've subsetted the `tmax` (maximum temperature) and `pr` (precipitation) data for the month of July betwen 1951-2014.
 
 ```{r, include=FALSE}
 weather <- readRDS("weather.RDS")
+weather <- weather[weather$month==7 & weather$loc==1,]
 head(weather)
 ```
 
@@ -138,7 +140,7 @@ X1_test <- matrix(X[-train_ind,1],ncol = 1)
 X2_train <- X[train_ind,1:2]
 X2_test <- X[-train_ind,1:2]
 
-# Basis functions, whic are the 'output' from the neural networks
+# Basis functions, which are the 'output' from the neural networks
 M_basis_train <- t(basis(y1_train,n.knots,knots))
 I_basis_train <- t(basis(y1_train,n.knots,knots, integral = TRUE))
 
@@ -150,12 +152,18 @@ I_basis_test <- t(basis(y1_test,n.knots,knots, integral = TRUE))
 
 **Building the model:** This follows very similar to the previous examples. We consider a very simple model with one input dimension (the intercept), and output dimensions corresponding to the number of knots. In between there is a single hidden layer with 32 neurons and a `relu` activation function. The output layer has a `softmax` activation function which ensures that the output is 15 probabilities that sum to 1.
 
+Recall the likelihood for SPQR: $$f(y\vert x) = \sum_{k=1}^K \pi_k(x)M_k(y)$$
+
+In the absence of covariates, it would be: $$f(y) = \sum_{k=1}^K \pi_kM_k(y)$$
+
+As mentioned before, loss functions in `keras` always has two arguments, `y_true` and `y_pred`. In case of SPQR, `y_true` will be the M-basis functions $M_k(y)$ and `y_pred` would be the neural network output probabilities $\pi_k$.
+
 ```{r}
 model <- keras_model_sequential()
 
 model %>%
   # Adds a densely-connected layer with 64 units to the model:
-  layer_dense(units = 32, input_shape = c(1), activation = 'relu') %>%
+  layer_dense(units = 32, input_shape = c(1), activation = 'sigmoid') %>%
   
   # Add a final layer with 1 ouput
   layer_dense(units = n.knots, activation = 'softmax')
@@ -169,7 +177,7 @@ model %>% compile(
 model
 ```
 
-Note that the response is not `y` but the M-spline basis functions.
+Note that the response is not `y` but the M-spline basis functions. We follow up by fitting an SPQR model for the marginal distribution of `tmax`. I'm employing early stopping to prevent overfitting, but not checkpointing in this example.
 
 ```{r}
 early.stopping <-   callback_early_stopping(monitor = "val_loss", patience = 5)
@@ -180,12 +188,10 @@ history <- model %>% fit(
   callbacks = list(early.stopping),
   epochs = 100,
   batch_size = 128,
-  verbose = 0,
+  verbose = 1,
   validation_split = 0.2,
   shuffle = T
 )
-
-
 ```
 
 **Diagnostics**: We first do a QQ-plot on the validation data, which shows a good fit.
@@ -218,14 +224,16 @@ model1 %>%
   
   # Add a final layer with 1 ouput
   layer_dense(units = 15, activation = 'softmax')
-```
-
-```{r}
 model1 %>% compile(
   optimizer = "adam",
   loss = nloglik_loss_SPQR
   )
 model1
+```
+
+Fit the model:
+
+```{r}
 early.stopping <-   callback_early_stopping(monitor = "val_loss", patience = 5)
 
 history <- model1 %>% fit(
