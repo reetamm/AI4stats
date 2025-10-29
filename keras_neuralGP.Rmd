@@ -1,0 +1,202 @@
+---
+title: "Neural estimation for a Gaussian process"
+output: html_document
+date: "2025-10-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+We will be using Google Colab to build a neural estimator for the range parameter of a Gaussian process with a squared exponential kernel. First, go to <https://colab.research.google.com/>. Click File -\> New notebook in Drive, and then change the runtime to R (Runtime -\> Change runtime type, then pick R in the dropdown). We will not be using GPUs, so keep the CPU box checked.
+
+```{r, include = F}
+rm(list=ls())
+library(keras3)
+library(ggplot2)
+```
+
+# Installation
+
+To install Keras3, run the following code. Colab already has Python and Tensorflow modules installed, so we do not need to do anything particularly complicated here.
+
+```{r, eval = F}
+remotes::install_github("rstudio/tensorflow")
+```
+
+```{r eval = F}
+install.packages("keras3")
+library(keras3)
+library(ggplot2)
+```
+
+Set seed for reproducibility.
+
+```{r}
+set_random_seed(1)
+```
+
+## Data import and pre-processing
+
+Loading up the weather data we have been using so far
+```{r, include=FALSE}
+weather <- readRDS("weather.RDS")
+head(weather)
+```
+
+```{r, eval=F}
+file_url <- "https://github.com/reetamm/AI4stats/blob/main/weather.RDS?raw=true"
+weather <- readRDS(url(file_url))
+head(weather)
+```
+
+Subsetting the `tmax` data for January, and following up with a very crude plot.
+```{r}
+weatherJan <- weather[weather$month==1 & weather$lat == weather$lat[1],]
+years <- lubridate::year(weatherJan$time)
+head(weatherJan)
+dim(weatherJan)
+ggplot(weatherJan[1:5,],aes(x=lon,y=lat,fill=tmax)) + geom_raster()
+```
+
+We could stick with the original coordinates but I'll scale it because I have a better sense of what the range (lengthscale for the ML people) parameter should be if I have the distances on  (0,1) . We first calculate the distance matrix.
+
+```{r}
+coords <- weatherJan[1:5,3]
+coords_scaled <- (coords - min(coords))/diff(range(coords))
+d = abs(outer(coords_scaled,coords_scaled,"-")) # compute distance matrix, d_{ij} = |x_i - x_j|
+```
+
+Then set a prior on the dependence parameter, here denoted by $\rho$. I'm just generating them from a $Unif(0,0.5)$
+
+```{r}
+K <- 50000
+n <- 64
+
+rho_train = runif(K,0,0.5) # length scale
+```
+
+Now, generate some training data. We use $n=64$ replicates as this will coincide with the number of observations we have.
+
+We select the data to be on uniform margins using `pnorm`; but we could stick with any arbitrary margin.
+
+```{r}
+gp_val <- function(l,d,n){
+    y <- matrix(NA,length(l),n*5)
+    for(i in 1:length(l)){
+        Sigma_SE = exp(-d^2/(2*l[i]^2)) # squared exponential kernel
+        y[i,] = c(mvtnorm::rmvnorm(n,sigma=Sigma_SE))
+    }
+return(y)
+}
+x <- pnorm(gp_val(rho_train,d,n))
+
+dim(x)
+```
+
+## Build the estimator
+
+```{r}
+model <- keras_model_sequential()
+
+model %>%
+    layer_dense(units = 256, activation = 'relu') %>%
+    
+    layer_dense(units = 128, activation = 'relu') %>%
+
+    layer_dense(units = 64, activation = 'relu') %>%
+
+    layer_dense(units = 1, activation = 'sigmoid')
+```
+
+Now, compile the model with a loss function and an optimizer. Here we use Adam with standard hyper-parameters, and the MSE loss function to target the posterior mean.
+
+```{r}
+model %>% compile(
+    optimizer = "adam",
+    loss = "mean_squared_error"
+)
+```
+
+I'm going to keep a checkpoint as well as early stopping (somewhat overkill, but just showing that you _can_ have multiple options).
+```{r}
+checkpoint <- callback_model_checkpoint(
+  paste0("checkpoints/gp.weights.h5"),
+  monitor = "val_loss",
+  verbose = 0,
+  save_best_only = TRUE,
+  save_weights_only = TRUE,
+  mode = "min",
+  save_freq = "epoch"
+)
+
+early.stopping <-   callback_early_stopping(monitor = "val_loss", patience = 10)
+```
+
+
+Now fit the model. We train the model for 100 epochs, with an 80/20 validation data split. The default minibatch size is 16. Note that the model gradients are not evaluated on the validation data, and instead we can use the validation loss (i.e., the loss evaluated on the validation data) to motivate hyperparameters (e.g., neural net architecture) choices.
+
+If you choose to cancel training (ctrl + C, or the big red stop button), then the current model state will be saved and accessible.
+
+```{r}
+
+history <- model %>% fit(
+    x = x,
+    y = as.matrix(rho_train),
+    callbacks = list(early.stopping,checkpoint),
+    epochs = 100,
+    verbose = 0,
+    validation_split = 0.2,
+    shuffle = T
+)
+```
+
+Plot the training history, and print the summary of the architecture.
+
+```{r}
+plot(history)
+summary(model)
+```
+Let us load the best model back up.
+
+```{r}
+model <- load_model_weights(model,
+                                 filepath = paste0("checkpoints/gp.weights.h5"))
+```
+
+Now, let's see how well the estimator performs. We generate 1000 test datasets and compare the true values of $\rho$  with the predictions.
+
+```{r}
+K.test <- 1000
+rho_test <- runif(K.test,0,0.5)
+
+x.test <- pnorm(gp_val(rho_test,d,n))
+
+predictions <- model %>% predict(x.test)
+
+plot(rho_test, predictions)
+abline(a = 0, b = 1)
+```
+
+## Estimation for tmax data
+Now, we apply the estimator to real data. We will analyse annual temperature maxima.
+
+I calculate the monthly mean for each year. This would do better with a Gaussian process than just using the maxima.
+
+```{r}
+weather3 <- aggregate(weatherJan$tmax,by=list(weatherJan$loc,years),FUN=mean)
+```
+
+Need to put the data in the same form as the training data, and then scale it. We could fit a parametric/semiparametric model to transform the data to Uniform, but I'm doing the simplest thing in the form of a Z-transform and using `pnorm` on it.
+
+and then we can just estimate $\rho$ for our data.
+
+```{r}
+x.test <- matrix(c(weather3[,3]),nrow = 1)
+x.test <- pnorm((x.test-mean(x.test))/sd(x.test))
+model %>% predict(x.test)
+```
+

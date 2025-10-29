@@ -16,9 +16,6 @@ We will be using Google Colab for this example on density regression using semi-
 
 ```{r, include = F}
 rm(list=ls())
-reticulate::use_virtualenv("myenv", required = T)
-#library(tensorflow)
-library(keras)
 library(keras3)
 ```
 
@@ -38,7 +35,7 @@ library(keras3)
 Set seed for reproducibility.
 
 ```{r}
-tensorflow::set_random_seed(1)
+set_random_seed(1)
 ```
 
 ## Key functions for SPQR
@@ -150,7 +147,7 @@ I_basis_test <- t(basis(y1_test,n.knots,knots, integral = TRUE))
 
 ## Modeling the marginal distribution of `tmax`
 
-**Building the model:** This follows very similar to the previous examples. We consider a very simple model with one input dimension (the intercept), and output dimensions corresponding to the number of knots. In between there is a single hidden layer with 32 neurons and a `relu` activation function. The output layer has a `softmax` activation function which ensures that the output is 15 probabilities that sum to 1.
+**Building the model:** This follows very similar to the previous examples. We consider a very simple model with one input dimension (the intercept), and output dimensions corresponding to the number of knots. In between there is a single hidden layer with 12 neurons and a `sigmoid` activation function. The output layer has a `softmax` activation function which ensures that the output is 20 probabilities that sum to 1.
 
 Recall the likelihood for SPQR: $$f(y\vert x) = \sum_{k=1}^K \pi_k(x)M_k(y)$$
 
@@ -162,10 +159,8 @@ As mentioned before, loss functions in `keras` always has two arguments, `y_true
 model <- keras_model_sequential()
 
 model %>%
-  # Adds a densely-connected layer with 64 units to the model:
-  layer_dense(units = 32, input_shape = c(1), activation = 'sigmoid') %>%
+  layer_dense(units = 12, activation = 'sigmoid') %>%
   
-  # Add a final layer with 1 ouput
   layer_dense(units = n.knots, activation = 'softmax')
 ```
 
@@ -187,8 +182,8 @@ history <- model %>% fit(
   y = M_basis_train,
   callbacks = list(early.stopping),
   epochs = 100,
-  batch_size = 128,
-  verbose = 1,
+  batch_size = 16,
+  verbose = 0,
   validation_split = 0.2,
   shuffle = T
 )
@@ -198,7 +193,7 @@ history <- model %>% fit(
 
 ```{r}
 ycdf = predict.SPQR(model,X=X1_test,Y=y1_test,type = 'CDF')
-qqplot(runif(length(ycdf)),ycdf)
+qqplot(stats::ppoints(length(ycdf)),ycdf)
 abline(0,1)
 ```
 
@@ -219,11 +214,9 @@ lines(seq(0,1,length.out=101),
 model1 <- keras_model_sequential()
 
 model1 %>%
-  # Adds a densely-connected layer with 64 units to the model:
-  layer_dense(units = 32, input_shape = c(2), activation = 'relu') %>%
+  layer_dense(units = 12, activation = 'sigmoid') %>%
   
-  # Add a final layer with 1 ouput
-  layer_dense(units = 15, activation = 'softmax')
+  layer_dense(units = n.knots, activation = 'softmax')
 model1 %>% compile(
   optimizer = "adam",
   loss = nloglik_loss_SPQR
@@ -241,7 +234,7 @@ history <- model1 %>% fit(
   y = M_basis_train,
   callbacks = list(early.stopping),
   epochs = 100,
-  batch_size = 128,
+  batch_size = 16,
   verbose = 0,
   validation_split = 0.2,
   shuffle = T
@@ -252,7 +245,7 @@ history <- model1 %>% fit(
 
 ```{r}
 ycdf = predict.SPQR(model1,X=X2_test,Y=y1_test,type = 'CDF')
-qqplot(runif(length(ycdf)),ycdf)
+qqplot(stats::ppoints(length(ycdf)),ycdf)
 abline(0,1)
 ```
 
@@ -272,6 +265,8 @@ lines(c(0:100)/100,ypred[2,],'l',col='red')
 
 #pr=6mm
 lines(c(0:100)/100,ypred[3,],'l',col='blue') 
+
+legend('topleft', legend = c('0mm','1mm','6mm'),col=c('black','red','blue'), lty=1,cex=1)
 ```
 
 ### Marginal distribution of `tmax`
