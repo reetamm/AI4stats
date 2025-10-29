@@ -15,11 +15,11 @@ install_keras()
 set_random_seed(1)
 ```
 
-The code chunk above should be sufficient for getting you up and running.
+The code chunk above should be sufficient for getting you up and running. All code for the short course is written in `keras3` and will *not* work with the older `keras` package.
 
 ### Warning! 
 
-Mixing `tensorflow` + `keras` (which is how we had to do things previously) with `keras3` is generally speaking going to be a bad time. If you come across old `keras` code that you need to run, the best option is to rewrite it in `keras3` - documentation is fairly good and almost all of the functionality translates over In general I would recommend not mixing the versions because of them sharing a lot of frontend names but with different backend funcitonality, leading to conflicts and errors. If you have to use the old `keras`, installing it in a virtual environment is probably your best bet. You can find a good tutorial [here](https://github.com/callumbarltrop/DeepGauge).
+Mixing `tensorflow` + `keras` (which is how we had to do things previously) with `keras3` is generally speaking going to be a bad time. If you come across old `keras` code that you need to run, the best option is to rewrite it in `keras3` - documentation is fairly good and almost all of the functionality translates over In general. I would recommend not mixing the versions because of them sharing a lot of frontend names but with different backend funcitonality, leading to conflicts and errors. If you have to use the old `keras`, installing it in a virtual environment is probably your best bet. You can find a good tutorial [here](https://github.com/callumbarltrop/DeepGauge).
 
 ## Running the code during the short course.
 
