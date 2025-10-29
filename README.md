@@ -19,7 +19,7 @@ The code chunk above should be sufficient for getting you up and running. All co
 
 ### Warning!
 
-Mixing `tensorflow` + `keras` (which is how we had to do things previously) with `keras3` is generally speaking going to be a bad time. If you come across old `keras` code that you need to run, the best option is to rewrite it in `keras3` - documentation is fairly good and almost all of the functionality translates over In general. I would recommend not mixing the versions because of them sharing a lot of frontend names but with different backend funcitonality, leading to conflicts and errors. If you have to use the old `keras`, installing it in a virtual environment is probably your best bet. You can find a good tutorial [here](https://github.com/callumbarltrop/DeepGauge).
+I strongly advise against mixing `tensorflow` / `keras` (which is how we had to do things previously) with `keras3`. If you come across old `keras` code that you need to run, the best option is to rewrite it in `keras3` - documentation is generally excellent and almost all of the functionality translates over. I would recommend not mixing the versions because of them sharing a lot of frontend names but with different backend functionality, leading to conflicts and errors. If you have to use the old `keras`, installing it in a virtual environment where it cannot interact with `keras3` is probably your best bet. You can find a good tutorial [here](https://github.com/callumbarltrop/DeepGauge).
 
 ## Running the code during the short course.
 
