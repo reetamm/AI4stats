@@ -2,7 +2,7 @@
 
 Short course on AI for statistical analysis.
 
-## Keras installation guide.
+## Keras3 installation guide.
 
 We will be using `keras3` for this short course. You can find more details about `keras3` [here](https://keras3.posit.co/). In short the `keras3` package supersedes the older `keras` package. Previously, one would need to install `tensorflow` and `keras` to work with `keras`. My recent testing suggests that `keras3` simplifies the process a *lot*.
 
