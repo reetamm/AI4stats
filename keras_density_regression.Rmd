@@ -36,82 +36,127 @@ Set seed for reproducibility.
 set_random_seed(1)
 ```
 
-## Key functions for SPQR
+## The model
 
-The most important function in the second one, which evaluates the SPQR negative log-likelihood loss function. Since the SPQR likelihood includes M- and I-splines, the first function evaluates those. The final function is a predict function which is a wrapper around the predict function of keras. This function is used to predict PDFs, CDFs, and QFs associated with SPQR fits.
+We will assume, that for a covariate vector $X$ (which could be multivariate) and a univariate response $Y$, $$Y_i\vert X_i \sim Normal(\mu(X_i),\sigma(X_i))$$
 
-```{r}
-# Evaluate basis functions
-basis <- function(y,K,knots, integral=FALSE){
-  B     <- splines2::mSpline(y, knots = knots, 
-                   Boundary.knots=c(0,1),
-                   intercept=TRUE, degree = 2,
-                   integral=integral)
-  return(t(B))
-}
+and estimate the conditional density of $Y\vert X$. We first demonstrate this using some simulated data, and then use the weather data use used for SPQR.
 
-# Negative log-likelihood for SPQR
-nloglik_loss_SPQR  = function (y_true, y_pred){
-  numbasis <- op_shape(y_true)[[2]]
-  # print(numbasis)
-  probs <- y_pred[,1:numbasis]
-  sumprod <- op_sum(y_true*probs,axis=2)
-  spqr_loss <- -op_sum(op_log(sumprod))
-  return(spqr_loss)
-}
+## Generating data
 
-# Predict function used on fitted SPQR models
-predict.SPQR <- function(model,X,Y=NULL,nY=101,tau=0.5,type='QF'){
-  pred        <- as.matrix(model(X))
-  n <- nrow(pred)
-  ntau = length(tau)
-  n.knots <- ncol(pred)
-  if(is.null(Y) | type=='QF')
-    Y <- seq(0,1,length.out = nY)
-  B <- (basis(Y , n.knots,knots, integral = (type!='PDF')))
-  if(ncol(B)!=n)
-    df1  <- pred%*%B
-  if(ncol(B)==n)
-    df1  <- colSums(B*t(pred))
-  if(type!='QF'){
-    return(df1)
-  }
-  if(type=='QF'){
-    qf1 = matrix(NA,n,ntau)
-    for(i in 1:n)
-      qf1[i,] <- stats::approx(df1[i,], Y, xout=tau, ties = list("ordered", min))$y
-    return(qf1)
-  }
-}
-```
-
-**SPQR parameters**: Other than the neural network hyperparameters, the number of basis function knots is the only thing that needs to be set. Values between 10-25 work well in practice.
+We generate 10000 data points from the following data generating process: $$X_1\sim Beta(3,2), X_2\sim Beta(2,5)$$ $$Y_i\vert X_{1i},X_{2i} \sim Normal(X_{1i}^2 - 3X_{2i},2X_{1i})$$ We also generate 1000 test points.
 
 ```{r}
-n.knots <- 20
-knots = seq(1/(n.knots-2), 1-1/(n.knots-2), length=n.knots-3)
+x_train <- cbind(rbeta(10000,3,2), rbeta(10000,2,5))
+y_train <- rnorm(10000,mean = x_train[,1]^2-3*x_train[,2]+5,sd = 2*x_train[,1])
+x_test <- cbind(rbeta(1000,3,2), rbeta(1000,2,5))
+y_test <- rnorm(1000,mean = x_test[,1]^2-3*x_test[,2]+5,sd = 2*x_test[,1])
 ```
 
-## Data import and pre-processing
+Let's visualize this real quick.
 
-This is temperature and precipitation data at a single grid point in the US, based on the nClimGrid dataset. It is part of the data used by [Majumder et al (2024)](https://arxiv.org/abs/2411.18799) for bias correcting climate model data. I've subsetted the `tmax` (maximum temperature) and `pr` (precipitation) data for the month of July betwen 1951-2014.
-
-```{r, include=FALSE}
-weather <- readRDS("weather.RDS")
-weather <- weather[weather$month==7 & weather$loc==1,]
-head(weather)
+```{r}
+par(mfrow=c(1,3))
+plot(x_train[,1],y_train)
+plot(x_train[,2],y_train)
+plot(density(y_train))
+par(mfrow=c(1,1))
 ```
 
-```{r, eval=F}
+All of this is really non-linear and I don't think linear regression would be a good idea here. Quantile regression may(?) be better? But we will estimate the conditional density instead.
+
+## Define the keras model
+
+This is no longer a sequential model, because we need to run our 2 outputs (the conditional mean and SD) through different activation functions. We employ what is called the functional API for `keras3`. A detailed guide on how it differs from the sequential models is found in the official docs at <https://keras3.posit.co/articles/functional_api.html>.
+
+In short, things don't need to be in sequence and can have different branches, where we can do different things to different branches. Complex architectures will often be built using the functional API.
+
+```{r}
+input1 <- keras_input(shape=dim(x_train)[2], name = 'covariates')
+x_1 <- layer_dense(input1, units = 12, activation = 'relu')
+
+x_2 <- layer_dense(x_1, 12, activation = 'relu')
+
+mu <- layer_dense(x_2, 1, activation = 'linear', name = "mean")
+sig <- layer_dense(x_2, 1, activation = 'exponential', name = "sd")
+
+out_concat <- layer_concatenate(mu,sig)
+out_concat <- layer_identity(out_concat, name='params')
+model <- keras_model(inputs = list(input1), 
+                     outputs = out_concat, name = "norm_dist")
+```
+
+### The loss function
+
+The output layer of the MLP above is not a point prediction of $Y$, but instead the conditional mean and SD of a Normal distribution fitted to $Y\vert X$. We will now do MLE. For this we need the log-likelihood of the Normal distribution. In particular, since this needs to be a loss function that is minimized, we have the negative log-likelihood.
+
+```{r}
+nloglik_loss_normal  = function (y_true, y_pred){
+    # print(numbasis)
+    mu <- y_pred[,1]
+    sig <- y_pred[,2]
+    isthisloss <- op_sum(op_log(sig) + 0.5*((y_true-mu)/sig)**2) 
+    return(isthisloss)
+}
+```
+
+I now compile and run the model. I have very few bells and whistles in my model specification; I am sure this can be improved with some effort.
+
+```{r}
+model |> compile(
+    loss = nloglik_loss_normal,
+    optimizer = optimizer_adam(learning_rate=0.01)
+)
+
+history <- model |> fit(
+    x= x_train,
+    y=y_train,
+    epochs = 50,
+    batch_size = 128,
+    verbose=0,
+    callbacks=list(callback_early_stopping(monitor = "val_loss",
+                                                     min_delta = 0, patience = 10)),
+    validation_split = 0.2
+)
+```
+
+Plot the history and the model:
+
+```{r}
+model
+plot(history)
+```
+
+It seems to have converged pretty quickly - even though this is non-linear, by deep learning standards, it is fairly straightforward..
+
+## Predictions
+
+Since I know what the acutal means and SDs were for this, we can directly compare.
+
+```{r}
+preds <- as.matrix(model(x_test))
+true_mean <- x_test[,1]^2-3*x_test[,2]+5
+true_sd <- 2*x_test[,1]
+
+par(mfrow=c(1,2))
+plot(preds[,1],true_mean)
+abline(0,1)
+
+plot(preds[,2],true_sd)
+abline(0,1)
+par(mfrow=c(1,1))
+```
+
+# Fitting a distribution for `tmax|pr`
+
+I'm going to get the same data I used for the SPQR example. I'll even keep the same model I used with the simulated data. The only change I'll make is I will add an intercept term to the precipitation data so that there are 2 covariates which is what the model is expecting. It also let to a better fitted and stable model when I checked.
+
+```{r}
 file_url <- "https://github.com/reetamm/AI4stats/blob/main/weather.RDS?raw=true"
 weather <- readRDS(url(file_url))
 weather <- weather[weather$month==7 & weather$loc==1,]
 head(weather)
-```
 
-Instead of modeling the raw precip, we use a log-transform. The data is split in an 80/20 ration as training and testing.
-
-```{r}
 mnth <- weather$month
 tmax <- weather$tmax - 273 #convert tmax to celsius
 pr <- log(weather$pr + 0.0001) #convert pr to log-scale
@@ -120,184 +165,46 @@ n_total <- length(tmax)
 train_ind <- sample(1:n_total,ceiling(0.8*n_total)) #80% training data
 
 tmax_range <- range(tmax)
-y1 <- (tmax - tmax_range[1])/diff(tmax_range) # Rescale tmax to [0,1]
+y1 <- tmax
 X <- cbind(1,pr)
 
 # train and validation data
 y1_train <- y1[train_ind]
 y1_test <- y1[-train_ind]
 
-# For unconditional density, with only intercept
-X1_train <- matrix(X[train_ind,1],ncol = 1)
-X1_test <- matrix(X[-train_ind,1],ncol = 1)
-
 # For conditional density of tmax with intercept and log-pr
 X2_train <- X[train_ind,1:2]
 X2_test <- X[-train_ind,1:2]
-
-# Basis functions, which are the 'output' from the neural networks
-M_basis_train <- t(basis(y1_train,n.knots,knots))
-I_basis_train <- t(basis(y1_train,n.knots,knots, integral = TRUE))
-
-M_basis_test <- t(basis(y1_test,n.knots,knots))
-I_basis_test <- t(basis(y1_test,n.knots,knots, integral = TRUE))
 ```
-
-## Modeling the marginal distribution of `tmax`
-
-**Building the model:** This follows very similar to the previous examples. We consider a very simple model with one input dimension (the intercept), and output dimensions corresponding to the number of knots. In between there is a single hidden layer with 12 neurons and a `sigmoid` activation function. The output layer has a `softmax` activation function which ensures that the output is 20 probabilities that sum to 1.
-
-Recall the likelihood for SPQR: $$f(y\vert x) = \sum_{k=1}^K \pi_k(x)M_k(y)$$
-
-In the absence of covariates, it would be: $$f(y) = \sum_{k=1}^K \pi_kM_k(y)$$
-
-As mentioned before, loss functions in `keras` always has two arguments, `y_true` and `y_pred`. In case of SPQR, `y_true` will be the M-basis functions $M_k(y)$ and `y_pred` would be the neural network output probabilities $\pi_k$.
+We now fit the model with this new dataset.
 
 ```{r}
-model <- keras_model_sequential()
-
-model %>%
-  layer_dense(units = 12, activation = 'sigmoid') %>%
-  
-  layer_dense(units = n.knots, activation = 'softmax')
-```
-
-```{r}
-model %>% compile(
-  optimizer = "adam",
-  loss = nloglik_loss_SPQR
-  )
-model
-```
-
-Note that the response is not `y` but the M-spline basis functions. We follow up by fitting an SPQR model for the marginal distribution of `tmax`. I'm employing early stopping to prevent overfitting, but not checkpointing in this example.
-
-```{r}
-early.stopping <-   callback_early_stopping(monitor = "val_loss", patience = 5)
-
-history <- model %>% fit(
-  x = X1_train,
-  y = M_basis_train,
-  callbacks = list(early.stopping),
-  epochs = 100,
-  batch_size = 16,
-  verbose = 0,
-  validation_split = 0.2,
-  shuffle = T
+history <- model |> fit(
+    x= X2_train,
+    y=y1_train,
+    epochs = 50,
+    batch_size = 128,
+    verbose = 0,
+    callbacks=list(callback_early_stopping(monitor = "val_loss",
+                                           min_delta = 0, patience = 10)),
+    validation_split = 0.2
 )
+plot(history)
 ```
 
-**Diagnostics**: We first do a QQ-plot on the validation data, which shows a good fit.
-
+## Predictions
+For each data point, we will be predicting out a mean and SD. There aren't any `true` values to compare again, but we can nevertheless check goodness of fit. I'll do that for the first 6 observations.
 ```{r}
-ycdf = predict.SPQR(model,X=X1_test,Y=y1_test,type = 'CDF')
-qqplot(stats::ppoints(length(ycdf)),ycdf)
-abline(0,1)
-```
-
-**Predictions**: Since there is only the intercept, we just predict f(y)
-
-```{r}
-ypred = predict.SPQR(model,X=X1_train,type = 'PDF')
-plot(density(y1_train))
-lines(seq(0,1,length.out=101),
-      ypred[1,],lty=2,col='blue','l')
-```
-
-## Modeling the conditional distribution of `tmax|pr`
-
-**Building the model:** The input to the neural network is now both an intercept term and the precipitation. The methodology is otherwise identical.
-
-```{r}
-model1 <- keras_model_sequential()
-
-model1 %>%
-  layer_dense(units = 12, activation = 'sigmoid') %>%
-  
-  layer_dense(units = n.knots, activation = 'softmax')
-model1 %>% compile(
-  optimizer = "adam",
-  loss = nloglik_loss_SPQR
-  )
-model1
-```
-
-Fit the model:
-
-```{r}
-early.stopping <-   callback_early_stopping(monitor = "val_loss", patience = 5)
-
-history <- model1 %>% fit(
-  x = X2_train,
-  y = M_basis_train,
-  callbacks = list(early.stopping),
-  epochs = 100,
-  batch_size = 16,
-  verbose = 0,
-  validation_split = 0.2,
-  shuffle = T
-)
-```
-
-**Diagnostics**: We do a goodness of fit as before.
-
-```{r}
-ycdf = predict.SPQR(model1,X=X2_test,Y=y1_test,type = 'CDF')
-qqplot(stats::ppoints(length(ycdf)),ycdf)
-abline(0,1)
-```
-
-### Conditional distributions of `tmax|pr`
-
-We plot the conditional distribution of tmax for three different precip regimes - no rainfall, 1mm of rainfall, and 6mm of rainfall.
-
-```{r}
-X_pred <- matrix(c(1,log(0.0001),1,log(1),1,log(6)),ncol=2,byrow = T)
-ypred = predict.SPQR(model1,X=X_pred,type = 'PDF')
-
-#pr=0mm
-plot(c(0:100)/100,ypred[1,],'l',col='black',xlab = 'y',ylab = 'f(y|x)',ylim=c(0,4)) 
-
-#pr=1mm
-lines(c(0:100)/100,ypred[2,],'l',col='red')
-
-#pr=6mm
-lines(c(0:100)/100,ypred[3,],'l',col='blue') 
-
-legend('topleft', legend = c('0mm','1mm','6mm'),col=c('black','red','blue'), lty=1,cex=1)
-```
-
-### Marginal distribution of `tmax`
-
-To evaluate the marginal density, we sample a range of `pr` values, and use marginalization to get the unconditional distribution.
-
-```{r}
-pr_range <- range(pr)
-# -9.210340  3.440484
-
-pr_seq <- seq(pr_range[1],pr_range[2],length.out = 1000)
-X_pred <- cbind(rep(1,1000),pr_seq)
-ypred <- predict.SPQR(model1,X=X_pred,type = 'PDF')
-ypred <- apply(ypred,2,mean)
-plot(density(y1_train),ylim=c(0,4))
-lines(seq(0,1,length.out=101),
-      ypred,lty=2,col='blue','l')
-```
-
-### Probability and quantile estimates
-
-The closed form of the CDF means that we can evaluate probability statements associated with the conditional (and marginal) distributions. We can also estimate quantiles.
-
-```{r}
-X_pred <- matrix(c(1,log(0.0001),1,log(1),1,log(6)),ncol=2,byrow = T)
-
-# Median temperature when there is no rainfall
-X0 <- matrix(X_pred[1,],nrow = 1)
-y0 <- predict.SPQR(model1,X=X0,type = 'QF',tau=0.5)
-y0*diff(tmax_range) + tmax_range[1]
-
-# Probability that tmax will be greater than 35 degress when there is no rainfall
-yyy <- (35-tmax_range[1])/diff(tmax_range)
-ycdf <- predict.SPQR(model1,X=X0,Y=yyy,type = 'CDF')
-1 - ycdf
+preds <- as.matrix(model(X2_test))
+head(y_test)
+y_pred <- matrix(NA,1000,6)
+for(i in 1:6)
+    y_pred[,i] <- rnorm(1000,preds[i,1],preds[i,2])
+par(mfrow=c(2,3))
+for(i in 1:6){
+    prcp <- round(exp(X2_test[i,2]) - 0.0001,2)
+    plot(density(y_pred[,i]),main=paste0('prcp = ',prcp))
+    abline(v=y1_test[i])  
+}
+par(mfrow=c(1,1))
 ```
