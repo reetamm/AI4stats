@@ -1,6 +1,6 @@
 # AI4stats
 
-Short course on AI for statistical analysis.
+Short course on AI for statistical analysis in `R`.
 
 ## Keras3 installation guide.
 
